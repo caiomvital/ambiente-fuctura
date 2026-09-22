@@ -47,19 +47,42 @@ if [[ "$EUID" -ne 0 ]]; then
 fi
 
 
+# ---------------------------------------------------------------------
+# LOG CENTRALIZADO
+#
+# Toda a saída do script (stdout e stderr) passa a ir simultaneamente
+# pro terminal e pra este arquivo. Útil pra diagnosticar à distância
+# uma máquina que falhou no meio da instalação: "cat" ou "tail" nesse
+# log dá o histórico completo, sem precisar reproduzir o problema.
+# ---------------------------------------------------------------------
+
+INSTALL_LOG="/var/log/fuctura-labs-install.log"
+exec > >(tee -a "$INSTALL_LOG") 2>&1
+
+
 # =====================================================================
 # 2) MARCA DE PROVISIONAMENTO (idempotência)
 # =====================================================================
 #
 # Evita reinstalar tudo do zero em máquinas que já rodaram o script.
-# Use --force para reprovisionar mesmo assim.
+#
+# IMPORTANTE: isso é só um "já rodei antes, não rodo de novo" — o script
+# NÃO verifica se algo quebrou ou foi desinstalado desde então (ex.:
+# alguém removeu o DBeaver). Se precisar checar/reparar uma máquina,
+# rode com --force.
+#
+# --force não é um "modo de verificação": ele REPROVISIONA a máquina
+# por completo — reaplica extensões, configurações, DBeaver, /etc/skel,
+# reset semanal e credenciais do zero.
 # ---------------------------------------------------------------------
 
 PROVISIONED_MARKER="/etc/fuctura-labs-provisioned"
 
 if [[ -f "$PROVISIONED_MARKER" && "$FORCE" == false ]]; then
     echo "Esta máquina já foi provisionada em $(cat "$PROVISIONED_MARKER")."
-    echo "Rode com --force se quiser reprovisionar mesmo assim."
+    echo "O script não faz nenhuma verificação ou reparo automático — ele só"
+    echo "pula a instalação porque já rodou aqui antes."
+    echo "Use --force para reprovisionar a máquina por completo."
     exit 0
 fi
 
@@ -126,10 +149,14 @@ if ! id "$REAL_USER" >/dev/null 2>&1; then
     # mesmo com DEBIAN_FRONTEND=noninteractive, já que isso é
     # comportamento do próprio adduser, não do apt.
     useradd -m -s /bin/bash "$REAL_USER"
-    echo "$REAL_USER:$REAL_USER_PASSWORD" | chpasswd
-
     echo "✓ Usuário '$REAL_USER' criado."
 fi
+
+# Fora do "if" de propósito: se o usuário já existir (ex.: rodando com
+# --force numa máquina já provisionada), garante mesmo assim que a
+# senha seja a definida aqui — senão --force não reprovisiona de fato
+# essa credencial se alguém tiver trocado a senha manualmente.
+echo "$REAL_USER:$REAL_USER_PASSWORD" | chpasswd
 
 REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
 
@@ -158,14 +185,33 @@ PG_PASSWORD="postgres"
 PG_PORT="5432"
 PG_DEFAULT_DATABASE="postgres"
 
+# Setada para false na seção 17 se o DBeaver não preservar a conexão
+# pré-configurada após a primeira inicialização — vira aviso no
+# diagnóstico final, não aborta o provisionamento.
+DBEAVER_CONNECTION_OK=true
+
 DBEAVER_CONNECTION_NAME="PostgreSQL - Local"
 DBEAVER_DATA_DIR="$REAL_HOME/.local/share/DBeaverData"
 DBEAVER_WORKSPACE="$DBEAVER_DATA_DIR/workspace6"
 DBEAVER_GENERAL="$DBEAVER_WORKSPACE/General"
 DBEAVER_DBEAVER_DIR="$DBEAVER_GENERAL/.dbeaver"
 
-# Dia/hora do reset semanal do perfil aluno (formato OnCalendar do systemd).
-RESET_SCHEDULE="Sun *-*-* 23:30:00"
+# Reset principal: domingo às 22:30, fora do expediente e antes da
+# semana de aula começar.
+#
+# Reset de recuperação: seg/qua/sex às 15h — só executa DE FATO se o
+# principal não tiver rodado recentemente (a máquina estava desligada
+# no domingo). Isso evita usar "Persistent=true" no timer, que faria o
+# reset disparar de surpresa assim que a máquina fosse ligada a
+# qualquer hora — inclusive com alguém já trabalhando no perfil
+# principal. Com dois horários fixos, o reset só acontece nesses
+# momentos previsíveis, nunca "no boot".
+RESET_SCHEDULE_PRIMARY="Sun *-*-* 22:30:00"
+RESET_SCHEDULE_CATCHUP="Mon,Wed,Fri *-*-* 15:00:00"
+
+# Se o último reset bem-sucedido tiver menos que isso, a recuperação
+# entende que o principal já rodou essa semana e não faz nada.
+CATCHUP_MAX_AGE_DAYS=4
 
 SETTINGS_DIR="$REAL_HOME/.config/Code/User"
 SETTINGS_FILE="$SETTINGS_DIR/settings.json"
@@ -203,7 +249,14 @@ rm -f /etc/apt/trusted.gpg.d/adoptium.gpg
 wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public \
     | gpg --dearmor > /etc/apt/trusted.gpg.d/adoptium.gpg
 
-CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-noble}")"
+# O repositório da Adoptium só conhece codenames Ubuntu (noble, jammy...).
+# No Linux Mint, VERSION_CODENAME é o nome próprio do Mint (ex.: "wilma"),
+# não a base Ubuntu — por isso usamos UBUNTU_CODENAME nesse caso.
+if [[ "$ID" == "linuxmint" ]]; then
+    CODENAME="${UBUNTU_CODENAME:-noble}"
+else
+    CODENAME="${VERSION_CODENAME:-noble}"
+fi
 echo "deb https://packages.adoptium.net/artifactory/deb ${CODENAME} main" \
     > /etc/apt/sources.list.d/adoptium.list
 
@@ -460,6 +513,21 @@ fi
 kill "$DBEAVER_PID" 2>/dev/null || true
 sleep 2
 
+# A existência do .metadata só prova que o DBeaver rodou — não que ele
+# preservou a conexão que escrevemos em data-sources.json (ele reescreve
+# esse arquivo ao migrar a senha pro armazenamento protegido próprio).
+# Confirma que os dados essenciais da conexão continuam lá.
+if [[ -f "$DBEAVER_DBEAVER_DIR/data-sources.json" ]] \
+    && grep -q "${DBEAVER_CONNECTION_NAME}" "$DBEAVER_DBEAVER_DIR/data-sources.json" \
+    && grep -q "localhost" "$DBEAVER_DBEAVER_DIR/data-sources.json" \
+    && grep -q "${PG_USER}" "$DBEAVER_DBEAVER_DIR/data-sources.json"; then
+    echo "✓ Conexão '${DBEAVER_CONNECTION_NAME}' confirmada em data-sources.json."
+else
+    DBEAVER_CONNECTION_OK=false
+    echo "AVISO: a conexão pré-configurada do DBeaver não foi encontrada após a"
+    echo "       inicialização — confira manualmente antes de liberar a máquina."
+fi
+
 
 # =====================================================================
 # 18) /etc/skel
@@ -478,10 +546,16 @@ if [[ -f "$SETTINGS_FILE" ]]; then
     cp "$SETTINGS_FILE" /etc/skel/.config/Code/User/settings.json
 fi
 
-if [[ -d "$DBEAVER_DATA_DIR" ]]; then
+if [[ -f "$DBEAVER_DBEAVER_DIR/data-sources.json" ]]; then
+    # Só o arquivo de conexão, não o workspace inteiro (.metadata, cache,
+    # secure storage). Copiar o DBeaverData inteiro faria o reset semanal
+    # herdar estado interno do DBeaver amarrado à versão/execução do
+    # momento da instalação, em vez de uma configuração limpa — o DBeaver
+    # recria .metadata e o resto sozinho na primeira abertura do aluno.
+    SKEL_DBEAVER_DIR="/etc/skel/.local/share/DBeaverData/workspace6/General/.dbeaver"
     rm -rf /etc/skel/.local/share/DBeaverData
-    mkdir -p /etc/skel/.local/share
-    cp -a "$DBEAVER_DATA_DIR" /etc/skel/.local/share/
+    mkdir -p "$SKEL_DBEAVER_DIR"
+    cp "$DBEAVER_DBEAVER_DIR/data-sources.json" "$SKEL_DBEAVER_DIR/"
 fi
 
 chown -R root:root /etc/skel/.vscode 2>/dev/null || true
@@ -511,11 +585,24 @@ HOME_DIR="/home/$USER_TO_RESET"
 LOG="/var/log/reset-aluno.log"
 PG_SUPERUSER_PASSWORD="__PG_PASSWORD__"
 
+# Timestamp do último reset bem-sucedido — o script de recuperação
+# (reset-aluno-catchup.sh) usa isso pra decidir se precisa agir ou se o
+# reset principal já rodou essa semana. Fica em /var/lib porque precisa
+# sobreviver a reboot (diferente de /run ou /tmp).
+RESET_MARKER="/var/lib/fuctura-labs/last-reset"
+mkdir -p "$(dirname "$RESET_MARKER")"
+
 log() {
     echo "$(date '+%F %T') - $1" >> "$LOG"
 }
 
 log "============================================================"
+
+if ! id "$USER_TO_RESET" >/dev/null 2>&1; then
+    log "ERRO: usuário '$USER_TO_RESET' não existe — abortando reset."
+    exit 1
+fi
+
 log "Iniciando reset do perfil $USER_TO_RESET"
 
 log "Encerrando processos do usuário."
@@ -551,16 +638,19 @@ for db in $DBS; do
 
     if [[ "$protected" == false ]]; then
         log "Apagando banco: $db"
-        sudo -u postgres psql -c \
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db';" \
-            >/dev/null 2>&1 || true
-        sudo -u postgres psql -c "DROP DATABASE IF EXISTS \"$db\";" >> "$LOG" 2>&1
+        # WITH (FORCE) (PostgreSQL 13+) derruba conexões ativas e apaga o
+        # banco num único comando atômico — evita a janela entre
+        # terminar conexões e o DROP em que uma nova sessão poderia
+        # abrir e fazer o DROP falhar.
+        sudo -u postgres psql -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" >> "$LOG" 2>&1
     fi
 done
 
 log "Restaurando senha do PostgreSQL."
 sudo -u postgres psql -c \
     "ALTER USER postgres WITH PASSWORD '$PG_SUPERUSER_PASSWORD';" >> "$LOG" 2>&1
+
+echo "$(date +%s)" > "$RESET_MARKER"
 
 log "Reset concluído."
 log "============================================================"
@@ -575,16 +665,50 @@ sed -i \
 
 chmod 700 /usr/local/sbin/reset-aluno.sh
 
+echo "==> Criando script de recuperação do reset..."
+
+cat > /usr/local/sbin/reset-aluno-catchup.sh <<'CATCHUPEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+RESET_MARKER="/var/lib/fuctura-labs/last-reset"
+RESET_SCRIPT="/usr/local/sbin/reset-aluno.sh"
+LOG="/var/log/reset-aluno.log"
+MAX_AGE_SECONDS=$(( __CATCHUP_MAX_AGE_DAYS__ * 24 * 60 * 60 ))
+
+log() {
+    echo "$(date '+%F %T') - $1" >> "$LOG"
+}
+
+NOW="$(date +%s)"
+
+if [[ -f "$RESET_MARKER" ]]; then
+    LAST="$(cat "$RESET_MARKER")"
+    AGE=$(( NOW - LAST ))
+    if (( AGE < MAX_AGE_SECONDS )); then
+        log "Catch-up: último reset há $(( AGE / 3600 ))h — dentro do prazo, pulando."
+        exit 0
+    fi
+fi
+
+log "Catch-up: reset principal não confirmado recentemente — executando agora."
+"$RESET_SCRIPT"
+CATCHUPEOF
+
+sed -i "s#__CATCHUP_MAX_AGE_DAYS__#${CATCHUP_MAX_AGE_DAYS}#g" /usr/local/sbin/reset-aluno-catchup.sh
+
+chmod 700 /usr/local/sbin/reset-aluno-catchup.sh
+
 
 # =====================================================================
 # 20) SYSTEMD SERVICE + TIMER
 # =====================================================================
 
-echo "==> Criando serviço e timer systemd..."
+echo "==> Criando serviços e timers systemd..."
 
 cat > /etc/systemd/system/reset-aluno.service <<'SERVICEEOF'
 [Unit]
-Description=Reset do ambiente do aluno Fuctura
+Description=Reset do ambiente do aluno Fuctura (principal)
 After=postgresql.service
 
 [Service]
@@ -592,23 +716,52 @@ Type=oneshot
 ExecStart=/usr/local/sbin/reset-aluno.sh
 SERVICEEOF
 
+cat > /etc/systemd/system/reset-aluno-catchup.service <<'CATCHUPSERVICEEOF'
+[Unit]
+Description=Reset do ambiente do aluno Fuctura (recuperação)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/reset-aluno-catchup.sh
+CATCHUPSERVICEEOF
+
+# Persistent=false nos dois: o reset só deve acontecer nesses horários
+# fixos e previsíveis, nunca "assim que a máquina ligar" — que é
+# justamente o comportamento perigoso que Persistent=true causaria
+# (reset disparando no meio do uso do perfil principal).
 cat > /etc/systemd/system/reset-aluno.timer <<'TIMEREOF'
 [Unit]
-Description=Reset semanal do ambiente Fuctura
+Description=Reset semanal do ambiente Fuctura (principal)
 
 [Timer]
-OnCalendar=__RESET_SCHEDULE__
-Persistent=true
+OnCalendar=__RESET_SCHEDULE_PRIMARY__
+Persistent=false
 Unit=reset-aluno.service
 
 [Install]
 WantedBy=timers.target
 TIMEREOF
 
-sed -i "s#__RESET_SCHEDULE__#${RESET_SCHEDULE}#g" /etc/systemd/system/reset-aluno.timer
+cat > /etc/systemd/system/reset-aluno-catchup.timer <<'CATCHUPTIMEREOF'
+[Unit]
+Description=Reset semanal do ambiente Fuctura (recuperação, se o principal não rodou)
+
+[Timer]
+OnCalendar=__RESET_SCHEDULE_CATCHUP__
+Persistent=false
+Unit=reset-aluno-catchup.service
+
+[Install]
+WantedBy=timers.target
+CATCHUPTIMEREOF
+
+sed -i "s#__RESET_SCHEDULE_PRIMARY__#${RESET_SCHEDULE_PRIMARY}#g" /etc/systemd/system/reset-aluno.timer
+sed -i "s#__RESET_SCHEDULE_CATCHUP__#${RESET_SCHEDULE_CATCHUP}#g" /etc/systemd/system/reset-aluno-catchup.timer
 
 systemctl daemon-reload
 systemctl enable --now reset-aluno.timer
+systemctl enable --now reset-aluno-catchup.timer
 
 
 # =====================================================================
@@ -620,4 +773,190 @@ date '+%F %T' > "$PROVISIONED_MARKER"
 
 # =====================================================================
 # 22) DIAGNÓSTICO FINAL
-# ============================
+# =====================================================================
+
+echo
+echo
+echo "=================================================================="
+echo "                  DIAGNÓSTICO FINAL"
+echo "=================================================================="
+echo
+
+echo "[SISTEMA]"
+echo "✓ $PRETTY_NAME"
+echo
+
+echo "[JAVA]"
+if java --version >/dev/null 2>&1; then
+    echo "✓ $(java --version 2>&1 | head -n1)"
+else
+    echo "✗ Java não está funcionando."
+fi
+if javac --version >/dev/null 2>&1; then
+    echo "✓ $(javac --version)"
+else
+    echo "✗ javac não está funcionando."
+fi
+echo
+
+echo "[MAVEN]"
+if mvn --version >/dev/null 2>&1; then
+    echo "✓ $(mvn --version 2>&1 | head -n1)"
+else
+    echo "✗ Maven não está funcionando."
+fi
+echo
+
+echo "[NODE]"
+if node --version >/dev/null 2>&1; then
+    echo "✓ Node $(node --version)"
+else
+    echo "✗ Node não está funcionando."
+fi
+if npm --version >/dev/null 2>&1; then
+    echo "✓ npm $(npm --version)"
+else
+    echo "✗ npm não está funcionando."
+fi
+if ng version >/dev/null 2>&1; then
+    echo "✓ Angular CLI disponível."
+else
+    echo "✗ Angular CLI não está funcionando."
+fi
+echo
+
+echo "[PYTHON]"
+if python3 --version >/dev/null 2>&1; then
+    echo "✓ $(python3 --version)"
+else
+    echo "✗ Python não está funcionando."
+fi
+if python3 -m pip --version >/dev/null 2>&1; then
+    echo "✓ pip disponível."
+else
+    echo "✗ pip não está disponível."
+fi
+if python3 -m django --version >/dev/null 2>&1; then
+    echo "✓ Django $(python3 -m django --version)"
+else
+    echo "✗ Django não está funcionando."
+fi
+echo
+
+echo "[POSTGRESQL]"
+if systemctl is-active --quiet postgresql; then
+    echo "✓ Serviço PostgreSQL ativo."
+else
+    echo "✗ Serviço PostgreSQL não está ativo."
+fi
+if sudo -u postgres psql -c "SELECT 1;" >/dev/null 2>&1; then
+    echo "✓ PostgreSQL responde (autenticação local do usuário Linux postgres)."
+else
+    echo "✗ PostgreSQL não respondeu (autenticação local)."
+fi
+# O teste acima só prova que o usuário Linux "postgres" consegue conectar
+# via peer auth — não que a senha configurada funciona por TCP, que é
+# exatamente o caminho que o DBeaver (e qualquer cliente externo) usa.
+if PGPASSWORD="$PG_PASSWORD" psql -h localhost -p "$PG_PORT" -U "$PG_USER" \
+    -d "$PG_DEFAULT_DATABASE" -c "SELECT 1;" >/dev/null 2>&1; then
+    PG_TCP_LOGIN_OK=true
+    echo "✓ Login TCP com usuário/senha '${PG_USER}' confirmado (mesmo caminho do DBeaver)."
+else
+    PG_TCP_LOGIN_OK=false
+    echo "✗ Login TCP com usuário/senha '${PG_USER}' falhou — a conexão do DBeaver não vai funcionar."
+fi
+echo
+
+echo "[DBEAVER]"
+if command -v dbeaver >/dev/null 2>&1; then
+    echo "✓ DBeaver instalado."
+else
+    echo "✗ DBeaver não foi encontrado."
+fi
+if [[ "$DBEAVER_CONNECTION_OK" == true ]]; then
+    echo "✓ Conexão PostgreSQL pré-configurada confirmada."
+else
+    echo "✗ Conexão do DBeaver não confirmada — revisar manualmente."
+fi
+echo
+
+echo "[VS CODE]"
+if command -v code >/dev/null 2>&1; then
+    echo "✓ $(code --version | head -n1)"
+else
+    echo "✗ VS Code não foi encontrado."
+fi
+echo
+
+echo "[EXTENSÕES DO VS CODE]"
+for ext in "${EXTENSIONS[@]}"; do
+    if sudo -u "$REAL_USER" env HOME="$REAL_HOME" code --list-extensions 2>/dev/null | grep -Fxq "$ext"; then
+        echo "✓ $ext"
+    else
+        echo "✗ $ext"
+    fi
+done
+if (( ${#FAILED_EXTENSIONS[@]} > 0 )); then
+    echo
+    echo "AVISO: falharam durante a instalação: ${FAILED_EXTENSIONS[*]}"
+fi
+echo
+
+echo "[RESET SEMANAL]"
+if systemctl is-enabled --quiet reset-aluno.timer; then
+    echo "✓ Timer principal habilitado."
+else
+    echo "✗ Timer principal não está habilitado."
+fi
+if systemctl is-enabled --quiet reset-aluno-catchup.timer; then
+    echo "✓ Timer de recuperação habilitado."
+else
+    echo "✗ Timer de recuperação não está habilitado."
+fi
+NEXT_RESET="$(systemctl show reset-aluno.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+if [[ -n "$NEXT_RESET" ]]; then
+    echo "Próximo reset principal: $NEXT_RESET"
+fi
+NEXT_CATCHUP="$(systemctl show reset-aluno-catchup.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+if [[ -n "$NEXT_CATCHUP" ]]; then
+    echo "Próxima janela de recuperação: $NEXT_CATCHUP"
+fi
+echo
+
+HAS_WARNINGS=false
+(( ${#FAILED_EXTENSIONS[@]} > 0 )) && HAS_WARNINGS=true
+[[ "$DBEAVER_CONNECTION_OK" == false ]] && HAS_WARNINGS=true
+[[ "$PG_TCP_LOGIN_OK" == false ]] && HAS_WARNINGS=true
+
+echo "=================================================================="
+if [[ "$HAS_WARNINGS" == true ]]; then
+    echo "           AMBIENTE FUCTURA PREPARADO COM AVISOS"
+else
+    echo "                 AMBIENTE FUCTURA PREPARADO"
+fi
+echo "=================================================================="
+echo
+echo "Usuário de aula : $REAL_USER"
+echo "Sistema         : $PRETTY_NAME"
+echo
+echo "Reset principal : $RESET_SCHEDULE_PRIMARY"
+echo "Recuperação     : $RESET_SCHEDULE_CATCHUP (só age se o principal não rodou)"
+echo "Log completo    : $INSTALL_LOG"
+echo
+if (( ${#FAILED_EXTENSIONS[@]} > 0 )); then
+    echo "AVISO: revise as extensões que falharam antes de liberar a máquina:"
+    echo "       ${FAILED_EXTENSIONS[*]}"
+    echo
+fi
+if [[ "$DBEAVER_CONNECTION_OK" == false ]]; then
+    echo "AVISO: a conexão do DBeaver não foi confirmada — revisar manualmente."
+    echo
+fi
+if [[ "$PG_TCP_LOGIN_OK" == false ]]; then
+    echo "AVISO: login TCP do PostgreSQL falhou — o DBeaver não vai conseguir"
+    echo "       conectar com as credenciais pré-configuradas. Revisar pg_hba.conf"
+    echo "       e a senha do usuário ${PG_USER}."
+    echo
+fi
+echo "Reprovisionar esta máquina no futuro: sudo ./setup-fuctura-labs.sh --force"
+echo "=================================================================="
