@@ -110,15 +110,25 @@ esac
 # Precisa vir ANTES de qualquer variável que dependa de $REAL_HOME (ex.:
 # caminho de dados do DBeaver). Na versão anterior essa ordem estava
 # invertida e causava "unbound variable" com set -u logo no início.
+#
+# Senha mantida propositalmente simples/previsível (aluno/aluno) —
+# decisão pedagógica, fora do escopo desta revisão.
 # ---------------------------------------------------------------------
 
 REAL_USER="aluno"
+REAL_USER_PASSWORD="aluno"
 
 if ! id "$REAL_USER" >/dev/null 2>&1; then
-    echo "ERRO: o usuário '$REAL_USER' não existe."
-    echo "Crie o usuário antes de executar o instalador:"
-    echo "  sudo adduser $REAL_USER"
-    exit 1
+    echo "Usuário '$REAL_USER' não existe — criando..."
+
+    # useradd (e não adduser) porque é não-interativo por natureza; o
+    # adduser do Debian/Ubuntu pergunta nome completo, telefone etc.
+    # mesmo com DEBIAN_FRONTEND=noninteractive, já que isso é
+    # comportamento do próprio adduser, não do apt.
+    useradd -m -s /bin/bash "$REAL_USER"
+    echo "$REAL_USER:$REAL_USER_PASSWORD" | chpasswd
+
+    echo "✓ Usuário '$REAL_USER' criado."
 fi
 
 REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
@@ -138,11 +148,10 @@ echo
 # 5) CONFIGURAÇÕES GERAIS
 # =====================================================================
 #
-# Senhas mantidas propositalmente simples/previsíveis (aluno/aluno,
-# postgres/postgres) — decisão pedagógica, fora do escopo desta revisão.
+# REAL_USER e REAL_USER_PASSWORD já foram definidas na seção 4.
+# Senha do PostgreSQL mantida propositalmente simples/previsível
+# (postgres/postgres) — decisão pedagógica, fora do escopo desta revisão.
 # ---------------------------------------------------------------------
-
-REAL_USER_PASSWORD="aluno"
 
 PG_USER="postgres"
 PG_PASSWORD="postgres"
