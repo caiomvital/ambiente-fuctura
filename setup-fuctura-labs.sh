@@ -295,9 +295,19 @@ echo "deb [signed-by=/usr/share/keyrings/dbeaver.gpg.key] https://dbeaver.io/deb
 # que cada base traz por padrão (Ubuntu 20.04, por exemplo, só tem
 # PostgreSQL 12 no repositório padrão). Usa o mesmo $CODENAME já
 # resolvido acima (com o ajuste de Mint incluso).
+#
+# Ubuntu 20.04 (focal) é EOL e o PGDG removeu os pacotes do repositório
+# principal em jul/2025 — o índice ainda existe lá (por isso o
+# apt-get update não acusa erro), mas os .deb de verdade só existem no
+# repositório de arquivo. Por isso o host muda nesse caso específico.
+PGDG_HOST="apt.postgresql.org"
+if [[ "$CODENAME" == "focal" ]]; then
+    PGDG_HOST="apt-archive.postgresql.org"
+fi
+
 wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --dearmor > /usr/share/keyrings/postgresql.gpg
-echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
+echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://${PGDG_HOST}/pub/repos/apt ${CODENAME}-pgdg main" \
     > /etc/apt/sources.list.d/pgdg.list
 
 echo "==> Atualizando índices dos pacotes..."
