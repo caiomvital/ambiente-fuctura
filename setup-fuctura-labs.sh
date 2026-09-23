@@ -297,7 +297,7 @@ echo "deb [signed-by=/usr/share/keyrings/dbeaver.gpg.key] https://dbeaver.io/deb
 # resolvido acima (com o ajuste de Mint incluso).
 wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --dearmor > /usr/share/keyrings/postgresql.gpg
-echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
+echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
     > /etc/apt/sources.list.d/pgdg.list
 
 echo "==> Atualizando índices dos pacotes..."
