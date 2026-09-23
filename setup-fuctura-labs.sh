@@ -19,15 +19,19 @@ export NEEDRESTART_MODE=a
 # =====================================================================
 
 FORCE=false
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 
 for arg in "$@"; do
     case "$arg" in
         --force)
             FORCE=true
             ;;
+        --tailscale-key=*)
+            TAILSCALE_AUTH_KEY="${arg#--tailscale-key=}"
+            ;;
         *)
             echo "Argumento desconhecido: $arg"
-            echo "Uso: sudo ./setup-fuctura-labs.sh [--force]"
+            echo "Uso: sudo ./setup-fuctura-labs.sh [--force] --tailscale-key=SUA_CHAVE"
             exit 1
             ;;
     esac
@@ -84,6 +88,22 @@ if [[ -f "$PROVISIONED_MARKER" && "$FORCE" == false ]]; then
     echo "pula a instalação porque já rodou aqui antes."
     echo "Use --force para reprovisionar a máquina por completo."
     exit 0
+fi
+
+# O Tailscale é obrigatório em toda máquina provisionada por este
+# script — não existe um "pular" silencioso. A chave NUNCA fica
+# hardcoded aqui (o repositório é público no GitHub); ela precisa vir
+# por fora, via variável de ambiente ou argumento, na hora de rodar.
+if [[ -z "$TAILSCALE_AUTH_KEY" ]]; then
+    echo "ERRO: chave de autenticação do Tailscale não informada."
+    echo
+    echo "Gere uma auth key REUTILIZÁVEL e PRÉ-AUTORIZADA (não efêmera) em:"
+    echo "  https://login.tailscale.com/admin/settings/keys"
+    echo
+    echo "E rode de novo de uma das duas formas:"
+    echo "  sudo TAILSCALE_AUTH_KEY=tskey-xxxx ./setup-fuctura-labs.sh"
+    echo "  sudo ./setup-fuctura-labs.sh --tailscale-key=tskey-xxxx"
+    exit 1
 fi
 
 
@@ -353,6 +373,34 @@ echo "==> Instalando ferramentas básicas..."
 apt-get install -y --no-install-recommends \
     ca-certificates curl wget gpg git unzip zip \
     build-essential software-properties-common
+
+
+# ---------------------------------------------------------------------
+# TAILSCALE
+#
+# Feito cedo de propósito: se a auth key estiver errada/expirada, é
+# melhor descobrir agora do que depois de 10 minutos instalando
+# JDK/Node/VS Code/DBeaver. O instalador oficial já detecta a distro
+# sozinho (Ubuntu/Mint, qualquer versão), sem precisar da lógica de
+# codename que usamos pro Adoptium/PGDG.
+#
+# --ssh habilita o Tailscale SSH: acesso remoto via `tailscale ssh
+# usuario@maquina` usando a identidade da tailnet, sem precisar
+# gerenciar chave SSH separada em cada máquina.
+# ---------------------------------------------------------------------
+
+echo "==> Instalando Tailscale..."
+curl -fsSL https://tailscale.com/install.sh | sh
+
+echo "==> Conectando à tailnet..."
+if ! tailscale up --authkey="$TAILSCALE_AUTH_KEY" --ssh; then
+    echo "ERRO: falha ao conectar ao Tailscale — confira se a auth key é"
+    echo "      válida e não expirou (chaves reutilizáveis expiram por"
+    echo "      padrão em 90 dias, salvo se você desabilitou isso ao criá-la)."
+    exit 1
+fi
+
+echo "✓ Tailscale conectado: $(tailscale ip -4 2>/dev/null || echo '(IP ainda não atribuído)')"
 
 
 # =====================================================================
@@ -850,6 +898,16 @@ echo "[SISTEMA]"
 echo "✓ $PRETTY_NAME"
 echo
 
+echo "[TAILSCALE]"
+if command -v tailscale >/dev/null 2>&1 && tailscale status >/dev/null 2>&1; then
+    TAILSCALE_OK=true
+    echo "✓ Conectado — IP: $(tailscale ip -4 2>/dev/null)"
+else
+    TAILSCALE_OK=false
+    echo "✗ Tailscale não está conectado."
+fi
+echo
+
 echo "[JAVA]"
 if java --version >/dev/null 2>&1; then
     echo "✓ $(java --version 2>&1 | head -n1)"
@@ -995,6 +1053,7 @@ HAS_WARNINGS=false
 [[ "$DBEAVER_CONNECTION_OK" == false ]] && HAS_WARNINGS=true
 [[ "$PG_TCP_LOGIN_OK" == false ]] && HAS_WARNINGS=true
 [[ "$OS_UNTESTED" == true ]] && HAS_WARNINGS=true
+[[ "$TAILSCALE_OK" == false ]] && HAS_WARNINGS=true
 
 echo "=================================================================="
 if [[ "$HAS_WARNINGS" == true ]]; then
@@ -1006,6 +1065,7 @@ echo "=================================================================="
 echo
 echo "Usuário de aula : $REAL_USER"
 echo "Sistema         : $PRETTY_NAME"
+echo "Tailscale IP    : $(tailscale ip -4 2>/dev/null || echo 'não conectado')"
 echo
 echo "Reset principal : $RESET_SCHEDULE_PRIMARY"
 echo "Recuperação     : $RESET_SCHEDULE_CATCHUP (só age se o principal não rodou)"
@@ -1032,5 +1092,10 @@ if [[ "$OS_UNTESTED" == true ]]; then
     echo "       antes de liberar a máquina."
     echo
 fi
-echo "Reprovisionar esta máquina no futuro: sudo ./setup-fuctura-labs.sh --force"
+if [[ "$TAILSCALE_OK" == false ]]; then
+    echo "AVISO: Tailscale não está conectado — revisar manualmente com"
+    echo "       'tailscale status' e 'tailscale up'."
+    echo
+fi
+echo "Reprovisionar esta máquina no futuro: sudo ./setup-fuctura-labs.sh --force --tailscale-key=..."
 echo "=================================================================="
