@@ -101,30 +101,49 @@ echo
 echo "Sistema detectado: ${PRETTY_NAME:-$ID}"
 echo
 
+OS_UNTESTED=false
+TESTED_UBUNTU_VERSIONS=("24.04" "22.04" "20.04")
+
 case "$ID" in
     ubuntu)
-        case "${VERSION_ID:-}" in
-            24.04|20.04)
-                echo "✓ Ubuntu ${VERSION_ID} LTS reconhecido."
-                ;;
-            *)
-                echo "ERRO: esta versão do Ubuntu não é suportada."
-                echo "Sistemas suportados: Ubuntu 24.04 LTS, Ubuntu 20.04 LTS, Linux Mint 22.x"
+        if [[ "${VERSION_ID:-}" =~ ^([0-9]{2})\.04$ ]]; then
+            LTS_YEAR="${BASH_REMATCH[1]}"
+            if (( LTS_YEAR % 2 != 0 )); then
+                echo "ERRO: Ubuntu ${VERSION_ID} não é uma versão LTS."
+                echo "Sistemas suportados: qualquer Ubuntu LTS (AA.04 de ano par), Linux Mint 22.x"
                 exit 1
-                ;;
-        esac
+            fi
+
+            IS_TESTED=false
+            for v in "${TESTED_UBUNTU_VERSIONS[@]}"; do
+                [[ "$v" == "${VERSION_ID}" ]] && IS_TESTED=true && break
+            done
+
+            if [[ "$IS_TESTED" == true ]]; then
+                echo "✓ Ubuntu ${VERSION_ID} LTS reconhecido."
+            else
+                OS_UNTESTED=true
+                echo "⚠ Ubuntu ${VERSION_ID} LTS reconhecido, mas ainda não testado com"
+                echo "  este script (testados até agora: ${TESTED_UBUNTU_VERSIONS[*]})."
+                echo "  Prosseguindo mesmo assim — confira o diagnóstico final com atenção."
+            fi
+        else
+            echo "ERRO: esta versão do Ubuntu não é suportada (só LTS, formato AA.04)."
+            echo "Sistemas suportados: qualquer Ubuntu LTS (AA.04 de ano par), Linux Mint 22.x"
+            exit 1
+        fi
         ;;
     linuxmint)
         if [[ "${VERSION_ID:-}" != 22* ]]; then
             echo "ERRO: esta versão do Linux Mint não é suportada."
-            echo "Sistemas suportados: Ubuntu 24.04 LTS, Ubuntu 20.04 LTS, Linux Mint 22.x"
+            echo "Sistemas suportados: qualquer Ubuntu LTS (AA.04 de ano par), Linux Mint 22.x"
             exit 1
         fi
         echo "✓ Linux Mint 22.x reconhecido."
         ;;
     *)
         echo "ERRO: sistema operacional não suportado."
-        echo "Sistemas suportados: Ubuntu 24.04 LTS, Ubuntu 20.04 LTS, Linux Mint 22.x"
+        echo "Sistemas suportados: qualquer Ubuntu LTS (AA.04 de ano par), Linux Mint 22.x"
         exit 1
         ;;
 esac
@@ -927,7 +946,10 @@ echo
 
 echo "[VS CODE]"
 if command -v code >/dev/null 2>&1; then
-    echo "✓ $(code --version | head -n1)"
+    # Como root, o VS Code se recusa a iniciar (aviso de "superusuário")
+    # e não imprime a versão — por isso checamos como o próprio aluno,
+    # igual já fazemos com as extensões.
+    echo "✓ $(sudo -u "$REAL_USER" env HOME="$REAL_HOME" code --version 2>/dev/null | head -n1)"
 else
     echo "✗ VS Code não foi encontrado."
 fi
@@ -935,7 +957,7 @@ echo
 
 echo "[EXTENSÕES DO VS CODE]"
 for ext in "${EXTENSIONS[@]}"; do
-    if sudo -u "$REAL_USER" env HOME="$REAL_HOME" code --list-extensions 2>/dev/null | grep -Fxq "$ext"; then
+    if sudo -u "$REAL_USER" env HOME="$REAL_HOME" code --list-extensions 2>/dev/null | grep -Fxqi "$ext"; then
         echo "✓ $ext"
     else
         echo "✗ $ext"
@@ -972,6 +994,7 @@ HAS_WARNINGS=false
 (( ${#FAILED_EXTENSIONS[@]} > 0 )) && HAS_WARNINGS=true
 [[ "$DBEAVER_CONNECTION_OK" == false ]] && HAS_WARNINGS=true
 [[ "$PG_TCP_LOGIN_OK" == false ]] && HAS_WARNINGS=true
+[[ "$OS_UNTESTED" == true ]] && HAS_WARNINGS=true
 
 echo "=================================================================="
 if [[ "$HAS_WARNINGS" == true ]]; then
@@ -1001,6 +1024,12 @@ if [[ "$PG_TCP_LOGIN_OK" == false ]]; then
     echo "AVISO: login TCP do PostgreSQL falhou — o DBeaver não vai conseguir"
     echo "       conectar com as credenciais pré-configuradas. Revisar pg_hba.conf"
     echo "       e a senha do usuário ${PG_USER}."
+    echo
+fi
+if [[ "$OS_UNTESTED" == true ]]; then
+    echo "AVISO: esta versão do sistema (${PRETTY_NAME}) ainda não foi testada"
+    echo "       com este script — revise o diagnóstico acima com atenção extra"
+    echo "       antes de liberar a máquina."
     echo
 fi
 echo "Reprovisionar esta máquina no futuro: sudo ./setup-fuctura-labs.sh --force"
