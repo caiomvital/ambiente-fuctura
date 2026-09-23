@@ -103,27 +103,38 @@ echo
 
 case "$ID" in
     ubuntu)
-        if [[ "${VERSION_ID:-}" != "24.04" ]]; then
-            echo "ERRO: esta versão do Ubuntu não é suportada."
-            echo "Sistemas suportados: Ubuntu 24.04 LTS, Linux Mint 22.x"
-            exit 1
-        fi
-        echo "✓ Ubuntu 24.04 LTS reconhecido."
+        case "${VERSION_ID:-}" in
+            24.04|20.04)
+                echo "✓ Ubuntu ${VERSION_ID} LTS reconhecido."
+                ;;
+            *)
+                echo "ERRO: esta versão do Ubuntu não é suportada."
+                echo "Sistemas suportados: Ubuntu 24.04 LTS, Ubuntu 20.04 LTS, Linux Mint 22.x"
+                exit 1
+                ;;
+        esac
         ;;
     linuxmint)
         if [[ "${VERSION_ID:-}" != 22* ]]; then
             echo "ERRO: esta versão do Linux Mint não é suportada."
-            echo "Sistemas suportados: Ubuntu 24.04 LTS, Linux Mint 22.x"
+            echo "Sistemas suportados: Ubuntu 24.04 LTS, Ubuntu 20.04 LTS, Linux Mint 22.x"
             exit 1
         fi
         echo "✓ Linux Mint 22.x reconhecido."
         ;;
     *)
         echo "ERRO: sistema operacional não suportado."
-        echo "Sistemas suportados: Ubuntu 24.04 LTS, Linux Mint 22.x"
+        echo "Sistemas suportados: Ubuntu 24.04 LTS, Ubuntu 20.04 LTS, Linux Mint 22.x"
         exit 1
         ;;
 esac
+
+# Ubuntu 20.04 só tem PostgreSQL 12 no repositório padrão, que não
+# suporta "DROP DATABASE ... WITH (FORCE)" usado no reset semanal (só
+# existe a partir do PG 13). Por isso adicionamos o repositório oficial
+# da PostgreSQL (PGDG) mais abaixo, garantindo uma versão atual em
+# qualquer uma das distros suportadas, em vez de depender do que cada
+# base trouxe por padrão.
 
 
 # =====================================================================
@@ -276,6 +287,18 @@ wget -qO- https://dbeaver.io/debs/dbeaver.gpg.key \
     | gpg --dearmor > /usr/share/keyrings/dbeaver.gpg.key
 echo "deb [signed-by=/usr/share/keyrings/dbeaver.gpg.key] https://dbeaver.io/debs/dbeaver-ce /" \
     > /etc/apt/sources.list.d/dbeaver.list
+
+# --- PostgreSQL (PGDG) --------------------------------------------------
+# Repositório oficial da PostgreSQL — garante uma versão atual (com
+# suporte a "DROP DATABASE ... WITH (FORCE)", usado no reset semanal)
+# em qualquer uma das distros suportadas, em vez de depender da versão
+# que cada base traz por padrão (Ubuntu 20.04, por exemplo, só tem
+# PostgreSQL 12 no repositório padrão). Usa o mesmo $CODENAME já
+# resolvido acima (com o ajuste de Mint incluso).
+wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    | gpg --dearmor > /usr/share/keyrings/postgresql.gpg
+echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list
 
 echo "==> Atualizando índices dos pacotes..."
 apt-get update -y
