@@ -301,7 +301,19 @@ echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.
     > /etc/apt/sources.list.d/pgdg.list
 
 echo "==> Atualizando índices dos pacotes..."
-apt-get update -y
+# Não usamos "set -e" puro aqui de propósito: se a máquina já tiver
+# algum repositório de terceiros pré-existente e quebrado (chave GPG
+# faltando, 404 etc.) que não tem nada a ver com o que este script
+# instala, isso não deveria derrubar o provisionamento inteiro. Os
+# passos seguintes já têm suas próprias checagens (ex.: abortamos se o
+# JDK 26 não aparecer depois da instalação) — essas é que decidem se um
+# problema é real pra gente.
+if ! apt-get update -y; then
+    echo "AVISO: 'apt-get update' encontrou erro em pelo menos um repositório."
+    echo "       Prosseguindo mesmo assim — se isso afetar algo que este"
+    echo "       script realmente precisa instalar, o passo específico vai"
+    echo "       falhar de forma clara logo em seguida."
+fi
 
 
 # =====================================================================
